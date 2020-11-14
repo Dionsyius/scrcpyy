@@ -21,11 +21,66 @@ build_cmd(char *cmd, size_t len, const char *const argv[]) {
 }
 
 enum process_result
-cmd_execute(const char *const argv[], HANDLE *handle) {
+cmd_execute_redirect(const char *const argv[], HANDLE *handle,
+                     HANDLE *pipe_stdin, HANDLE *pipe_stdout,
+                     HANDLE *pipe_stderr) {
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    HANDLE stdin_read_handle;
+    HANDLE stdout_write_handle;
+    HANDLE stderr_write_handle;
+    if (pipe_stdin) {
+        if (!CreatePipe(&stdin_read_handle, pipe_stdin, &sa, 0)) {
+            perror("pipe");
+            return PROCESS_ERROR_GENERIC;
+        }
+    }
+    if (pipe_stdout) {
+        if (!CreatePipe(pipe_stdout, &stdout_write_handle, &sa, 0)) {
+            perror("pipe");
+            // clean up
+            if (pipe_stdin) {
+               CloseHandle(&stdin_read_handle);
+               CloseHandle(pipe_stdin);
+            }
+            return PROCESS_ERROR_GENERIC;
+        }
+    }
+    if (pipe_stderr) {
+        if (!CreatePipe(pipe_stderr, &stderr_write_handle, &sa, 0)) {
+            perror("pipe");
+            // clean up
+            if (pipe_stdin) {
+                CloseHandle(&stdin_read_handle);
+                CloseHandle(pipe_stdin);
+            }
+            if (pipe_stdout) {
+                CloseHandle(pipe_stdout);
+                CloseHandle(&stdout_write_handle);
+            }
+            return PROCESS_ERROR_GENERIC;
+        }
+    }
+
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
+    if (pipe_stdin || pipe_stdout || pipe_stderr) {
+        si.dwFlags = STARTF_USESTDHANDLES;
+        if (pipe_stdin) {
+            si.hStdInput = stdin_read_handle;
+        }
+        if (pipe_stdout) {
+            si.hStdOutput = stdout_write_handle;
+        }
+        if (pipe_stderr) {
+            si.hStdError = stderr_write_handle;
+        }
+    }
 
     char cmd[256];
     if (build_cmd(cmd, sizeof(cmd), argv)) {
@@ -57,6 +112,11 @@ cmd_execute(const char *const argv[], HANDLE *handle) {
     SDL_free(wide);
     *handle = pi.hProcess;
     return PROCESS_SUCCESS;
+}
+
+enum process_result
+cmd_execute(const char *const argv[], HANDLE *handle) {
+    return cmd_execute_redirect(argv, handle, NULL, NULL, NULL);
 }
 
 bool
@@ -110,4 +170,20 @@ is_regular_file(const char *path) {
         return false;
     }
     return S_ISREG(path_stat.st_mode);
+}
+
+int
+read_pipe(HANDLE pipe, char *data, size_t len) {
+    DWORD r;
+    if (!ReadFile(pipe, data, len, &r, NULL)) {
+        return -1;
+    }
+    return r;
+}
+
+void
+close_pipe(HANDLE pipe) {
+    if (!CloseHandle(pipe)) {
+        LOGW("Cannot close pipe");
+    }
 }
